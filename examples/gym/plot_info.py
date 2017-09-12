@@ -35,6 +35,9 @@ class PyPlotDynamic():
         self.figure.canvas.draw()
         self.figure.canvas.flush_events()
 
+    def save(self, filename='out.png'):
+        pyplot.savefig(filename)
+
     # Example
     def __call__(self, xdata, ydata):
         self.on_running(xdata, ydata)
@@ -55,3 +58,7 @@ while True:
     print("{}:{}".format(step, reward))
     result = np.append(result, [[step, reward]], axis=0)
     d(result[:, 0], result[:, 1])
+
+
+np.savetxt('out.csv', result, delimiter=',')
+d.save()
