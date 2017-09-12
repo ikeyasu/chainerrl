@@ -53,6 +53,5 @@ while True:
     step = int(matched_step.group(1))
     reward = float(matched_reward.group(1))
     print("{}:{}".format(step, reward))
-    print(result)
     result = np.append(result, [[step, reward]], axis=0)
     d(result[:, 0], result[:, 1])
