@@ -23,6 +23,7 @@ import os
 import sys
 
 from chainer import optimizers
+from chainer import links as L
 import gym
 gym.undo_logger_setup()
 from gym import spaces
@@ -30,12 +31,14 @@ import gym.wrappers
 import numpy as np
 
 import chainerrl
+from chainerrl.action_value import DiscreteActionValue
 from chainerrl.agents.dqn import DQN
 from chainerrl import experiments
 from chainerrl import explorers
 from chainerrl import misc
 from chainerrl import q_functions
 from chainerrl import replay_buffer
+from chainerrl import links
 
 
 def main():
@@ -97,38 +100,40 @@ def main():
             misc.env_modifiers.make_rendered(env)
         return env
 
+    def parse_arch(arch, n_actions):
+        if arch == 'nature':
+            return links.Sequence(
+                links.NatureDQNHead(),
+                L.Linear(512, n_actions),
+                DiscreteActionValue)
+        elif arch == 'nips':
+            return links.Sequence(
+                links.NIPSDQNHead(),
+                L.Linear(256, n_actions),
+                DiscreteActionValue)
+        elif arch == 'dueling':
+            return DuelingDQN(n_actions)
+        else:
+            raise RuntimeError('Not supported architecture: {}'.format(arch))
+
     env = make_env(for_eval=False)
     timestep_limit = env.spec.tags.get(
         'wrapper_config.TimeLimit.max_episode_steps')
-    obs_space = env.observation_space
-    obs_size = obs_space.low.size
     action_space = env.action_space
 
     if isinstance(action_space, spaces.Box):
-        action_size = action_space.low.size
-        # Use NAF to apply DQN to continuous action spaces
-        q_func = q_functions.FCQuadraticStateQFunction(
-            obs_size, action_size,
-            n_hidden_channels=args.n_hidden_channels,
-            n_hidden_layers=args.n_hidden_layers,
-            action_space=action_space)
-        # Use the Ornstein-Uhlenbeck process for exploration
-        ou_sigma = (action_space.high - action_space.low) * 0.2
-        explorer = explorers.AdditiveOU(sigma=ou_sigma)
+        raise RuntimeError('Not supported')
     else:
         n_actions = action_space.n
-        q_func = q_functions.FCStateQFunctionWithDiscreteAction(
-            obs_size, n_actions,
-            n_hidden_channels=args.n_hidden_channels,
-            n_hidden_layers=args.n_hidden_layers)
-        # Use epsilon-greedy for exploration
+        q_func = parse_arch('nature', n_actions)
         explorer = explorers.LinearDecayEpsilonGreedy(
-            args.start_epsilon, args.end_epsilon, args.final_exploration_steps,
-            action_space.sample)
+            1.0, 0.1,
+            10 ** 6,
+            lambda: np.random.randint(n_actions))
 
     # Draw the computational graph and save it in the output directory.
     chainerrl.misc.draw_computational_graph(
-        [q_func(np.zeros_like(obs_space.low, dtype=np.float32)[None])],
+        [q_func(np.zeros((4, 84, 84), dtype=np.float32)[None])],
         os.path.join(args.outdir, 'model'))
 
     opt = optimizers.Adam()

@@ -8,6 +8,7 @@ standard_library.install_aliases()
 import argparse
 import os
 
+import chainer
 from chainer import functions as F
 from chainer import links as L
 from chainer import optimizers
@@ -24,6 +25,11 @@ from chainerrl import misc
 from chainerrl.q_functions import DuelingDQN
 from chainerrl import replay_buffer
 
+import gym
+gym.undo_logger_setup()
+from gym import spaces
+import gym.wrappers
+
 from dqn_phi import dqn_phi
 
 
@@ -38,16 +44,40 @@ def parse_activation(activation_str):
         raise RuntimeError(
             'Not supported activation: {}'.format(activation_str))
 
+class NatureDQNHead(chainer.ChainList):
+    """DQN's head (Nature version)"""
+
+    def __init__(self, n_input_channels=4, n_output_channels=512,
+                 activation=F.relu, bias=0.1):
+        self.n_input_channels = n_input_channels
+        self.activation = activation
+        self.n_output_channels = n_output_channels
+
+        layers = [
+            L.Convolution2D(n_input_channels, 32, 8, stride=4,
+                            initial_bias=bias),
+            L.Convolution2D(32, 64, 4, stride=2, initial_bias=bias),
+            L.Convolution2D(64, 64, 3, stride=1, initial_bias=bias),
+            L.Linear(22528, n_output_channels, initial_bias=bias),
+        ]
+
+        super(NatureDQNHead, self).__init__(*layers)
+
+    def __call__(self, state):
+        h = state
+        for layer in self:
+            h = self.activation(layer(h))
+        return h
 
 def parse_arch(arch, n_actions, activation):
     if arch == 'nature':
         return links.Sequence(
-            links.NatureDQNHead(activation=activation),
+            NatureDQNHead(activation=activation, n_input_channels=3),
             L.Linear(512, n_actions),
             DiscreteActionValue)
     elif arch == 'nips':
         return links.Sequence(
-            links.NIPSDQNHead(activation=activation),
+            links.NIPSDQNHead(activation=activation, n_input_channels=3),
             L.Linear(256, n_actions),
             DiscreteActionValue)
     elif arch == 'dueling':
@@ -61,6 +91,22 @@ def parse_agent(agent):
             'DoubleDQN': agents.DoubleDQN,
             'PAL': agents.PAL}[agent]
 
+def clip_action_filter(a):
+    return np.clip(a, action_space.low, action_space.high)
+
+def make_env(rom, for_eval):
+    env = gym.make(rom)
+    #if args.monitor:
+    #    env = gym.wrappers.Monitor(env, args.outdir)
+    #if isinstance(env.action_space, spaces.Box):
+    #    misc.env_modifiers.make_action_filtered(env, clip_action_filter)
+    if not for_eval:
+        misc.env_modifiers.make_reward_filtered(
+            env, lambda x: x * 1e-3)#args.reward_scale_factor)
+    #if ((args.render_eval and for_eval) or
+    #        (args.render_train and not for_eval)):
+    #    misc.env_modifiers.make_rendered(env)
+    return env
 
 def main():
     import logging
@@ -101,20 +147,22 @@ def main():
     print('Output files are saved in {}'.format(args.outdir))
 
     # In training, life loss is considered as terminal states
-    env = ale.ALE(args.rom, use_sdl=args.use_sdl)
-    misc.env_modifiers.make_reward_clipped(env, -1, 1)
+    env = make_env(args.rom, for_eval=False)
+    timestep_limit = env.spec.tags.get(
+        'wrapper_config.TimeLimit.max_episode_steps')
+    action_space = env.action_space
     # In testing, an episode is terminated  when all lives are lost
-    eval_env = ale.ALE(args.rom, use_sdl=args.use_sdl,
-                       treat_life_lost_as_terminal=False)
+    eval_env = make_env(args.rom, for_eval=True)
 
-    n_actions = env.number_of_actions
+    action_space = env.action_space
+    n_actions = action_space.n
     activation = parse_activation(args.activation)
     q_func = parse_arch(args.arch, n_actions, activation)
 
     # Draw the computational graph and save it in the output directory.
-    chainerrl.misc.draw_computational_graph(
-        [q_func(np.zeros((4, 84, 84), dtype=np.float32)[None])],
-        os.path.join(args.outdir, 'model'))
+    #chainerrl.misc.draw_computational_graph(
+    #    [q_func(np.zeros((4, 84, 84), dtype=np.float32)[None])],
+    #    os.path.join(args.outdir, 'model'))
 
     # Use the same hyper parameters as the Nature paper's
     opt = optimizers.RMSpropGraves(
