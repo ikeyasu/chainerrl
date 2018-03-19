@@ -15,14 +15,16 @@ from __future__ import unicode_literals
 from __future__ import division
 from __future__ import absolute_import
 from builtins import *  # NOQA
+import warnings
+
 from future import standard_library
 standard_library.install_aliases()
 
 import argparse
-import os
 import sys
 
 from chainer import optimizers
+from chainer import links as L
 import gym
 gym.undo_logger_setup()
 from gym import spaces
@@ -33,14 +35,50 @@ import chainerrl
 from chainerrl.agents.dqn import DQN
 from chainerrl import experiments
 from chainerrl import explorers
+from chainerrl import links
 from chainerrl import misc
 from chainerrl import q_functions
 from chainerrl import replay_buffer
+from chainerrl.action_value import DiscreteActionValue
+
+from gym_dqn_wrapper import GymDQNWrapper
+
+imgindex = 0
+try:
+    import cv2
+
+    def imresize(img, size):
+        return cv2.resize(img, size, interpolation=cv2.INTER_LINEAR)
+
+    def grayscale(img):
+        return cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+
+    def imsave(img, filename='screen{0:04d}.png'):
+        global imgindex
+        filename = filename.format(imgindex)
+        imgindex = (imgindex + 1) % 100
+        cv2.imwrite(filename, img)
+
+except Exception:
+    from PIL import Image
+
+    warnings.warn(
+        'Since cv2 is not available PIL will be used instead to resize images.'
+        ' This might affect the resulting images.')
+
+    def imresize(img, size):
+        return np.asarray(Image.fromarray(img).resize(size, Image.BILINEAR))
+
+    def grayscale(img):
+        raise Exception('Not implemented yet')
+
+    def imsave(img, filename='screen.png'):
+        raise Exception('Not implemented yet')
 
 
 def main():
     import logging
-    logging.basicConfig(level=logging.DEBUG)
+    logging.basicConfig(level=logging.ERROR)
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--outdir', type=str, default='dqn_out')
@@ -53,7 +91,7 @@ def main():
     parser.add_argument('--end-epsilon', type=float, default=0.1)
     parser.add_argument('--demo', action='store_true', default=False)
     parser.add_argument('--load', type=str, default=None)
-    parser.add_argument('--steps', type=int, default=10 ** 5)
+    parser.add_argument('--steps', type=int, default=10 ** 7)
     parser.add_argument('--prioritized-replay', action='store_true')
     parser.add_argument('--episodic-replay', action='store_true')
     parser.add_argument('--replay-start-size', type=int, default=1000)
@@ -71,6 +109,9 @@ def main():
     parser.add_argument('--render-eval', action='store_true')
     parser.add_argument('--monitor', action='store_true')
     parser.add_argument('--reward-scale-factor', type=float, default=1e-3)
+    parser.add_argument('--arch', type=str, default='nature',
+                        choices=['nature', 'fc'])
+    parser.add_argument('--use-dqn-wrap', action='store_true')
     args = parser.parse_args()
 
     args.outdir = experiments.prepare_output_dir(
@@ -83,8 +124,20 @@ def main():
     def clip_action_filter(a):
         return np.clip(a, action_space.low, action_space.high)
 
+    def parse_arch(arch, n_actions):
+        if arch == 'nature':
+            return links.Sequence(
+                links.NatureDQNHead(),
+                L.Linear(512, n_actions),
+                DiscreteActionValue)
+        else:
+            raise RuntimeError('Not supported architecture: {}'.format(arch))
+
     def make_env(for_eval):
-        env = gym.make(args.env)
+        if args.use_dqn_wrap:
+            env = GymDQNWrapper(args.env)
+        else:
+            env = gym.make(args.env)
         if args.monitor:
             env = gym.wrappers.Monitor(env, args.outdir)
         if isinstance(env.action_space, spaces.Box):
@@ -104,7 +157,13 @@ def main():
     obs_size = obs_space.low.size
     action_space = env.action_space
 
-    if isinstance(action_space, spaces.Box):
+    if args.arch == 'nature':
+        n_actions = action_space.n
+        q_func = parse_arch(args.arch, n_actions)
+        explorer = explorers.LinearDecayEpsilonGreedy(
+            args.start_epsilon, args.end_epsilon, args.final_exploration_steps,
+            action_space.sample)
+    elif isinstance(action_space, spaces.Box):
         action_size = action_space.low.size
         # Use NAF to apply DQN to continuous action spaces
         q_func = q_functions.FCQuadraticStateQFunction(
@@ -127,9 +186,9 @@ def main():
             action_space.sample)
 
     # Draw the computational graph and save it in the output directory.
-    chainerrl.misc.draw_computational_graph(
-        [q_func(np.zeros_like(obs_space.low, dtype=np.float32)[None])],
-        os.path.join(args.outdir, 'model'))
+    #chainerrl.misc.draw_computational_graph(
+    #    [q_func(np.zeros_like(obs_space.low, dtype=np.float32)[None])],
+    #    os.path.join(args.outdir, 'model'))
 
     opt = optimizers.Adam()
     opt.setup(q_func)
@@ -157,6 +216,8 @@ def main():
             rbuf = replay_buffer.ReplayBuffer(rbuf_capacity)
 
     def phi(obs):
+        #print(obs.shape)
+        assert obs.shape == (4, 84, 84)
         return obs.astype(np.float32)
 
     agent = DQN(q_func, opt, rbuf, gpu=args.gpu, gamma=args.gamma,
